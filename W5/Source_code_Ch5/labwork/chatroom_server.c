@@ -4,32 +4,28 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/select.h>
-#include <sys/poll.h>
 #include <errno.h>
 
 #define PORT 8080
 #define MAX_CLIENTS 10
 #define BUFFER_SIZE 1024
+#define USERNAME_SIZE 32
 
-void broadcast_message(int sender_fd, int *client_sockets, int num_clients, char *message);
-int get_activity_select(int server_fd, int *client_sockets, fd_set *readfds);
-int get_activity_poll(int server_fd, int *client_sockets, struct pollfd *fds);
-int get_activity_pselect(int server_fd, int *client_sockets, fd_set *readfds, sigset_t *orig_mask);
+typedef struct {
+    int socket;
+    char username[USERNAME_SIZE];
+} Client;
+
+void broadcast_message(int sender_fd, Client *clients, int num_clients, char *message);
+void notify_all_clients(Client *clients, int num_clients, char *notification);
 
 int main() {
-    int server_fd, new_socket, client_sockets[MAX_CLIENTS], max_sd, activity, i;
+    int server_fd, new_socket, max_sd, activity, i;
     struct sockaddr_in address;
     int opt = 1;
     fd_set readfds;
-    struct pollfd fds[MAX_CLIENTS + 1];
-    sigset_t orig_mask;
     char buffer[BUFFER_SIZE];
-
-
-    // Initialize all client sockets to 0
-    for (i = 0; i < MAX_CLIENTS; i++) {
-        client_sockets[i] = 0;
-    }
+    Client clients[MAX_CLIENTS] = {0};
 
     // Create socket
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
@@ -65,13 +61,14 @@ int main() {
     while (1) {
         // Clear the socket set
         FD_ZERO(&readfds);
+
         // Add server socket to set
         FD_SET(server_fd, &readfds);
         max_sd = server_fd;
 
-        int max_sd = server_fd;
-        for (int i = 0; i < MAX_CLIENTS; i++) {
-            int sd = client_sockets[i];
+        // Add client sockets to set
+        for (i = 0; i < MAX_CLIENTS; i++) {
+            int sd = clients[i].socket;
             if (sd > 0) {
                 FD_SET(sd, &readfds);
             }
@@ -80,7 +77,11 @@ int main() {
             }
         }
 
+        // Wait for activity on one of the sockets
         activity = select(max_sd + 1, &readfds, NULL, NULL, NULL);
+        if ((activity < 0) && (errno != EINTR)) {
+            perror("select error");
+        }
 
         // If something happened on the master socket, then it's an incoming connection
         if (FD_ISSET(server_fd, &readfds)) {
@@ -89,14 +90,25 @@ int main() {
                 perror("accept");
                 exit(EXIT_FAILURE);
             }
-            printf("New connection, socket fd is %d, ip is : %s, port : %d\n", 
-                   new_socket, inet_ntoa(address.sin_addr), ntohs(address.sin_port));
 
-            // Add new socket to array of sockets
+            // Request username from the new client
+            char username[USERNAME_SIZE];
+            memset(username, 0, USERNAME_SIZE); // Clear the username buffer
+            recv(new_socket, username, USERNAME_SIZE, 0);
+            username[strcspn(username, "\n")] = '\0'; // Remove newline character
+
+            // Add new socket to array of clients
             for (i = 0; i < MAX_CLIENTS; i++) {
-                if (client_sockets[i] == 0) {
-                    client_sockets[i] = new_socket;
-                    printf("Adding to list of sockets as %d\n", i);
+                if (clients[i].socket == 0) {
+                    clients[i].socket = new_socket;
+                    strncpy(clients[i].username, username, USERNAME_SIZE);
+                    printf("New connection, socket fd is %d, username is %s\n", new_socket, username);
+
+                    // Notify all clients about the new user
+                    char notification[BUFFER_SIZE];
+                    snprintf(notification, BUFFER_SIZE, "%s has entered the chat", username);
+                    notify_all_clients(clients, MAX_CLIENTS, notification);
+
                     break;
                 }
             }
@@ -104,20 +116,32 @@ int main() {
 
         // Check for IO operations on other sockets
         for (i = 0; i < MAX_CLIENTS; i++) {
-            int sd = client_sockets[i];
+            int sd = clients[i].socket;
             if (FD_ISSET(sd, &readfds)) {
                 int valread;
                 if ((valread = read(sd, buffer, BUFFER_SIZE)) == 0) {
+                    // Client disconnected
                     socklen_t addrlen = sizeof(address);
                     getpeername(sd, (struct sockaddr *)&address, &addrlen);
-                    printf("Client disconnected, ip %s, port %d\n", 
-                           inet_ntoa(address.sin_addr), ntohs(address.sin_port));
+                    printf("Client disconnected, ip %s, port %d\n", inet_ntoa(address.sin_addr), ntohs(address.sin_port));
+
+                    // Notify all clients about the user leaving
+                    char notification[BUFFER_SIZE];
+                    snprintf(notification, BUFFER_SIZE, "%s has left the chat", clients[i].username);
+                    notify_all_clients(clients, MAX_CLIENTS, notification);
+
                     close(sd);
-                    client_sockets[i] = 0;
+                    clients[i].socket = 0;
+                    memset(clients[i].username, 0, USERNAME_SIZE);
                 } else {
+                    // Process the incoming message
                     buffer[valread] = '\0';
-                    printf("Message from client %d: %s\n", i, buffer);
-                    broadcast_message(sd, client_sockets, MAX_CLIENTS, buffer);
+                    char message[BUFFER_SIZE + USERNAME_SIZE + 4];
+                    snprintf(message, sizeof(message), "%s: %s", clients[i].username, buffer);
+                    printf("Message from client %d: %s\n", i, message);
+
+                    // Broadcast the message to other clients
+                    broadcast_message(sd, clients, MAX_CLIENTS, message);
                 }
             }
         }
@@ -126,43 +150,20 @@ int main() {
     return 0;
 }
 
-void broadcast_message(int sender_fd, int *client_sockets, int num_clients, char *message) {
+void broadcast_message(int sender_fd, Client *clients, int num_clients, char *message) {
     for (int i = 0; i < num_clients; i++) {
-        int client_fd = client_sockets[i];
+        int client_fd = clients[i].socket;
         if (client_fd != sender_fd && client_fd > 0) {
             send(client_fd, message, strlen(message), 0);
         }
     }
 }
 
-/*
-int get_activity_poll(int server_fd, int *client_sockets, struct pollfd *fds) {
-    int num_fds = 1; 
-    fds[0].fd = server_fd;
-    fds[0].events = POLLIN;
-
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        int sd = client_sockets[i];
-        if (sd > 0) {
-            fds[num_fds].fd = sd;
-            fds[num_fds].events = POLLIN;
-            num_fds++;
+void notify_all_clients(Client *clients, int num_clients, char *notification) {
+    for (int i = 0; i < num_clients; i++) {
+        int client_fd = clients[i].socket;
+        if (client_fd > 0) {
+            send(client_fd, notification, strlen(notification), 0);
         }
     }
-    return poll(fds, num_fds, -1);
-}
-*/
-
-int get_activity_pselect(int server_fd, int *client_sockets, fd_set *readfds, sigset_t *orig_mask) {
-    int max_sd = server_fd;
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        int sd = client_sockets[i];
-        if (sd > 0) {
-            FD_SET(sd, readfds);
-        }
-        if (sd > max_sd) {
-            max_sd = sd;
-        }
-    }
-    return pselect(max_sd + 1, readfds, NULL, NULL, NULL, orig_mask);
 }
