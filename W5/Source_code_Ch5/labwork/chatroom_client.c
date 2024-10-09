@@ -66,7 +66,7 @@ int main() {
         // Check if there is input from the user
         if (FD_ISSET(STDIN_FILENO, &readfds)) {
             fgets(buffer, BUFFER_SIZE, stdin);
-            buffer[strcspn(buffer, "\n")] = '\0'; // Remove newline character
+            buffer[strcspn(buffer, "\n")] = '\0'; // Remove \n
 
             // Check if the string is empty. If it is, stop the program
             if (buffer[0] == '\0') {

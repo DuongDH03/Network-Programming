@@ -17,7 +17,6 @@ typedef struct {
 } Client;
 
 void broadcast_message(int sender_fd, Client *clients, int num_clients, char *message);
-void notify_all_clients(Client *clients, int num_clients, char *notification);
 
 int main() {
     int server_fd, new_socket, max_sd, activity, i;
@@ -107,7 +106,7 @@ int main() {
                     // Notify all clients about the new user
                     char notification[BUFFER_SIZE];
                     snprintf(notification, BUFFER_SIZE, "%s has entered the chat", username);
-                    notify_all_clients(clients, MAX_CLIENTS, notification);
+                    broadcast_message(-1, clients, MAX_CLIENTS, notification);
 
                     break;
                 }
@@ -128,7 +127,7 @@ int main() {
                     // Notify all clients about the user leaving
                     char notification[BUFFER_SIZE];
                     snprintf(notification, BUFFER_SIZE, "%s has left the chat", clients[i].username);
-                    notify_all_clients(clients, MAX_CLIENTS, notification);
+                    broadcast_message(-1, clients, MAX_CLIENTS, notification);
 
                     close(sd);
                     clients[i].socket = 0;
@@ -155,15 +154,6 @@ void broadcast_message(int sender_fd, Client *clients, int num_clients, char *me
         int client_fd = clients[i].socket;
         if (client_fd != sender_fd && client_fd > 0) {
             send(client_fd, message, strlen(message), 0);
-        }
-    }
-}
-
-void notify_all_clients(Client *clients, int num_clients, char *notification) {
-    for (int i = 0; i < num_clients; i++) {
-        int client_fd = clients[i].socket;
-        if (client_fd > 0) {
-            send(client_fd, notification, strlen(notification), 0);
         }
     }
 }
